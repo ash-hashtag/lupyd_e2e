@@ -1,4 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:math';
+import 'dart:typed_data';
 
 import 'package:cryptography/cryptography.dart';
 
@@ -17,6 +21,36 @@ extension ToMap on SecretBox {
       "M": cipherText,
       "n": nonce,
       "m": mac.bytes,
+    };
+  }
+}
+
+class EncryptedMessage {
+  final List<int> message, nonce, mac;
+
+  EncryptedMessage({
+    required this.message,
+    required this.nonce,
+    required this.mac,
+  });
+
+  factory EncryptedMessage.fromSecretBox(SecretBox box) {
+    return EncryptedMessage(
+      message: box.cipherText,
+      nonce: box.nonce,
+      mac: box.mac.bytes,
+    );
+  }
+
+  SecretBox toSecretBox() {
+    return SecretBox(message, nonce: nonce, mac: Mac(mac));
+  }
+
+  Map<String, List<int>> toMap() {
+    return {
+      "n": nonce,
+      "m": mac,
+      "M": message,
     };
   }
 }
@@ -70,22 +104,148 @@ class DoubleRatchet {
   SecretKey get senderKey => _senderKey;
   SecretKey get receiverKey => _receiverKey;
 
-  Future<SecretBox> encryptString(String text) async {
+  Future<EncryptedMessage> encryptString(String text) async {
     final newSenderKey = await keyDerivationFunction
         .deriveKey(secretKey: senderKey, nonce: const [0]);
     final encrypted =
         await encryptionAlgorithm.encryptString(text, secretKey: newSenderKey);
     _senderKey = newSenderKey;
 
-    return encrypted;
+    return EncryptedMessage.fromSecretBox(encrypted);
   }
 
-  Future<String> decryptString(SecretBox box) async {
+  Future<String> decryptString(EncryptedMessage encryptedMessage) async {
     final newReceiverKey = await keyDerivationFunction
         .deriveKey(secretKey: receiverKey, nonce: const [0]);
+    final box = encryptedMessage.toSecretBox();
     final encrypted =
         await encryptionAlgorithm.decryptString(box, secretKey: newReceiverKey);
     _receiverKey = newReceiverKey;
     return encrypted;
   }
+}
+
+extension Bytes on Random {
+  Uint8List nextBytes(int length) {
+    final bytes = Uint8List(length);
+    for (var i = 0; i < length; i++) {
+      bytes[i] = nextInt(256);
+    }
+    return bytes;
+  }
+}
+
+class EncryptedStream {
+  final Stream<List<int>> stream;
+  final List<int> nonce, secretKey;
+  final FutureOr<Mac> mac;
+
+  EncryptedStream({
+    required this.stream,
+    required this.nonce,
+    required this.mac,
+    required this.secretKey,
+  });
+  Future<Map<String, List<int>>> encryptionDetailsToMap() async {
+    return {"m": (await mac).bytes, "n": nonce, "k": secretKey};
+  }
+}
+
+EncryptedStream encryptStream(Stream<List<int>> inputStream) {
+  final rng = Random.secure();
+
+  final keyBytes = rng.nextBytes(32);
+  final key = SecretKey(keyBytes);
+
+  final algorithm = AesCbc.with256bits(macAlgorithm: Hmac.sha256());
+
+  final nonce = rng.nextBytes(16);
+  final macCompleter = Completer<Mac>();
+  void onMac(Mac mac) {
+    macCompleter.complete(mac);
+  }
+
+  final stream = algorithm.encryptStream(inputStream,
+      secretKey: key, onMac: onMac, nonce: nonce);
+  final encryptedStream = EncryptedStream(
+      stream: stream,
+      nonce: nonce,
+      secretKey: keyBytes,
+      mac: macCompleter.future);
+
+  return encryptedStream;
+}
+
+Stream<List<int>> decryptStream(EncryptedStream encryptedStream) {
+  final algorithm = AesCbc.with256bits(macAlgorithm: Hmac.sha256());
+  return algorithm.decryptStream(encryptedStream.stream,
+      secretKey: SecretKey(encryptedStream.secretKey),
+      nonce: encryptedStream.nonce,
+      mac: encryptedStream.mac);
+}
+
+class EncryptedFile {
+  File file;
+  List<int> secretKey, nonce, mac;
+
+  EncryptedFile({
+    required this.file,
+    required this.nonce,
+    required this.mac,
+    required this.secretKey,
+  });
+  Map<String, List<int>> encryptionDetailsToMap() {
+    return {"m": mac, "n": nonce, "k": secretKey};
+  }
+}
+
+Future<EncryptedFile> encryptFile(File input, File output) async {
+  final encryptedStream = encryptStream(input.openRead());
+
+  await output.create(recursive: true);
+
+  final sink = output.openWrite();
+  await sink.addStream(encryptedStream.stream);
+  await sink.flush();
+  await sink.close();
+
+  return EncryptedFile(
+      file: output,
+      nonce: encryptedStream.nonce,
+      mac: (await encryptedStream.mac).bytes,
+      secretKey: encryptedStream.secretKey);
+}
+
+class EncryptedBytes {
+  List<int> bytes;
+  List<int> nonce, mac, secretKey;
+
+  EncryptedBytes({
+    required this.bytes,
+    required this.nonce,
+    required this.mac,
+    required this.secretKey,
+  });
+
+  Map<String, List<int>> encryptionDetailsToMap() {
+    return {"m": mac, "n": nonce, "k": secretKey};
+  }
+}
+
+Future encryptBytes(Uint8List bytes) async {
+  final algorithm = AesCbc.with256bits(macAlgorithm: Hmac.sha256());
+  final rng = Random.secure();
+
+  final keyBytes = rng.nextBytes(32);
+  final nonce = rng.nextBytes(16);
+
+  final box = await algorithm.encrypt(bytes,
+      secretKey: SecretKey(keyBytes), nonce: nonce);
+
+  return EncryptedBytes(
+    bytes: box.cipherText,
+    nonce: box.nonce,
+    mac: box.mac.bytes,
+    secretKey: keyBytes,
+  );
 }

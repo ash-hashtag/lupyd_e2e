@@ -174,24 +174,22 @@ class Server {
   Map<String, List<String>> db = {};
 
   final jsonEncoder = JsonEncoder.withIndent(" ");
-  void sendSecretBox(SecretBox box, String to) {
-    final s = json.encode(box.toMap());
+  void sendSecretBox(EncryptedMessage box, String to) {
+    final s = json.encode(box.toSecretBox().toMap());
     if (db[to] != null) {
       db[to]!.add(s);
     } else {
       db[to] = [s];
     }
-    // print("Sending to $to");
-    // print(jsonEncoder.convert(json.encode(db)));
   }
 
-  List<SecretBox> readMessages(String from) {
-    // print("$from");
-    // print(jsonEncoder.convert(json.encode(db)));
+  List<EncryptedMessage> readMessages(String from) {
     final list = db.remove(from);
     if (list != null) {
-      return list.map((e) => secretBoxfromJson(e)).toList();
+      return list
+          .map((e) => EncryptedMessage.fromSecretBox(secretBoxfromJson(e)))
+          .toList();
     }
-    return <SecretBox>[];
+    return <EncryptedMessage>[];
   }
 }
